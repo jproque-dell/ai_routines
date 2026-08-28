@@ -64,6 +64,28 @@ def fetch_inline_comments(patch_id):
     return out
 
 
+def fetch_mergeable(patch_id, revision):
+    """The same mergeability check that backs the "Merge Conflict" box on a
+    Gerrit change page — a dedicated endpoint rather than a field on the
+    change detail, since Gerrit only computes it on request.
+    """
+    if not revision:
+        return None
+    url = f"{GERRIT_BASE}/changes/{patch_id}/revisions/{revision}/mergeable"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+    if raw.startswith(XSSI_PREFIX):
+        raw = raw[len(XSSI_PREFIX):]
+    try:
+        return json.loads(raw).get("mergeable")
+    except json.JSONDecodeError:
+        return None
+
+
 def fetch_change(patch_id):
     url = f"{GERRIT_BASE}/changes/{patch_id}/detail?o=CURRENT_REVISION&o=DETAILED_LABELS&o=MESSAGES&o=CURRENT_COMMIT"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -113,6 +135,10 @@ def fetch_change(patch_id):
     verified = label_summary("Verified")
     code_review = label_summary("Code-Review")
 
+    mergeable = None
+    if status == "NEW":
+        mergeable = fetch_mergeable(patch_id, data.get("current_revision"))
+
     messages = data.get("messages", []) or []
     latest_comments = []
     # Keep a generous window so filtering CI/Zuul noise out at display time
@@ -137,6 +163,7 @@ def fetch_change(patch_id):
         "submitted": submitted,
         "verified": verified,
         "code_review": code_review,
+        "mergeable": mergeable,
         "comments": latest_comments,
         "url": f"{GERRIT_BASE}/c/{project}/+/{patch_id}" if project else f"{GERRIT_BASE}/c/{patch_id}",
     }
@@ -164,7 +191,8 @@ def main():
             result["inline_comments"] = fetch_inline_comments(pid)
         cache[pid] = result
         n_inline = len(result.get("inline_comments", []))
-        print(f"OK ({n_inline} inline comments)" if result.get("found") else f"FAIL ({result.get('error')})")
+        conflict_note = " [MERGE CONFLICT]" if result.get("mergeable") is False else ""
+        print(f"OK ({n_inline} inline comments){conflict_note}" if result.get("found") else f"FAIL ({result.get('error')})")
         time.sleep(0.15)
 
     found = sum(1 for v in cache.values() if v.get("found"))

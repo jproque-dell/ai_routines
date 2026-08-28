@@ -181,14 +181,17 @@ def open_reviewer_threads(inline_comments):
 def compute_action(lv):
     """Infer whether a reviewer is waiting on an action from our side.
 
-    Priority: merged/abandoned patches need nothing further; a live -1/-2 from
-    a non-team Code-Review voter means changes were explicitly requested;
-    Gerrit's own "unresolved" flag on an inline comment thread whose last
-    word is a reviewer's is the most authoritative "reply expected" signal;
-    failing that, a substantive top-level message left unanswered by our
-    side falls back to the same verdict; no review engagement yet just means
-    it's waiting in the queue, not on us; anything else with positive
-    engagement is on track.
+    Priority: merged/abandoned patches need nothing further; a merge conflict
+    against the target branch (Gerrit's own mergeability check — the same
+    signal behind the "Merge Conflict" box on the change page) blocks
+    everything else and always needs a rebase from us first; a live -1/-2
+    from a non-team Code-Review voter means changes were explicitly
+    requested; Gerrit's own "unresolved" flag on an inline comment thread
+    whose last word is a reviewer's is the most authoritative "reply
+    expected" signal; failing that, a substantive top-level message left
+    unanswered by our side falls back to the same verdict; no review
+    engagement yet just means it's waiting in the queue, not on us; anything
+    else with positive engagement is on track.
     """
     if not lv.get("found"):
         return {"level": "unknown", "label": "Unresolved", "detail": lv.get("error", "")}
@@ -197,6 +200,10 @@ def compute_action(lv):
     if status in ("MERGED", "ABANDONED"):
         return {"level": "none", "label": "No action needed",
                 "detail": "Merged" if status == "MERGED" else "Abandoned"}
+
+    if lv.get("mergeable") is False:
+        return {"level": "bad", "label": "Merge conflict",
+                "detail": "Gerrit reports this patch conflicts with its target branch — needs a rebase before it can be reviewed or merged."}
 
     cr_votes = ((lv.get("code_review") or {}).get("votes")) or []
     negative = [(n, v) for n, v in cr_votes if v < 0 and not is_team_member(n)]
@@ -252,11 +259,12 @@ def main():
     abandoned = sum(1 for r in rows if r["_live"].get("status") == "ABANDONED")
     unresolved = sum(1 for r in rows if not r["_live"].get("found"))
     action_needed = sum(1 for r in rows if r["_action"]["level"] in ("bad", "warn"))
+    merge_conflicts = sum(1 for r in rows if r["_live"].get("mergeable") is False)
 
     ready_to_merge = 0
     for r in rows:
         lv = r["_live"]
-        if lv.get("status") != "NEW":
+        if lv.get("status") != "NEW" or lv.get("mergeable") is False:
             continue
         cr = (lv.get("code_review") or {}).get("state", "")
         ver = (lv.get("verified") or {}).get("state", "")
@@ -282,7 +290,12 @@ def main():
         st = lv.get("status", "UNKNOWN")
         cls = {"MERGED": "pill-good", "NEW": "pill-warn", "ABANDONED": "pill-bad"}.get(st, "pill-unknown")
         label = {"MERGED": "Merged", "NEW": "Open", "ABANDONED": "Abandoned"}.get(st, st.title())
-        return f'<span class="pill {cls}">{label}</span>'
+        pill = f'<span class="pill {cls}">{label}</span>'
+        if lv.get("mergeable") is False:
+            pill += (' <span class="pill pill-bad" title="Gerrit reports a merge conflict against the '
+                     'target branch — the same signal behind the \'Merge Conflict\' box on the change page">'
+                     '⚠ Conflict</span>')
+        return pill
 
     def vote_badge(label_data, name):
         if not label_data:
@@ -678,6 +691,7 @@ def main():
     <div class="stat good"><div class="n">{merged}</div><div class="l">Merged</div></div>
     <div class="stat warn"><div class="n">{open_}</div><div class="l">Open in Gerrit</div></div>
     <div class="stat bad"><div class="n">{action_needed}</div><div class="l">Action needed<br>from us</div></div>
+    <div class="stat bad"><div class="n">{merge_conflicts}</div><div class="l">Merge conflicts</div></div>
     <div class="stat good"><div class="n">{ready_to_merge}</div><div class="l">Ready to merge<br>(CI+CR approved)</div></div>
     <div class="stat bad"><div class="n">{abandoned}</div><div class="l">Abandoned</div></div>
   </div>
@@ -696,7 +710,7 @@ def main():
     </select>
     <select id="filter-action" aria-label="Filter by action needed">
       <option value="">All actions</option>
-      <option value="bad">Changes requested</option>
+      <option value="bad">Changes requested / merge conflict</option>
       <option value="warn">Reviewer reply expected</option>
       <option value="neutral">Awaiting reviewer attention</option>
       <option value="good">On track</option>
@@ -730,7 +744,7 @@ def main():
   opendev.org's Gerrit REST API doesn't send CORS headers, and this page's sandbox blocks requests to any host but Google Fonts — so this table can't poll live from your browser. It's a snapshot fetched server-side and baked into the page.
   To refresh it: re-run <code>fetch_gerrit.py --section "2026.2 Hibiscus"</code> then <code>build.py</code> in the dashboard working directory, and republish.
   <br><br>
-  <b>"Action needed from us"</b> is inferred, not authoritative: <b>Changes requested</b> means a non-team reviewer currently has a &minus;1/&minus;2 Code-Review vote standing; <b>Reviewer reply expected</b> means Gerrit still marks an inline comment thread (or, failing that, the last written message) as coming from a reviewer and unanswered (hover the pill for it); <b>Awaiting reviewer attention</b> means no one has reviewed it yet; <b>On track</b> means there's reviewer engagement with nothing outstanding — including patches reviewed entirely through inline comments that were all resolved without a formal vote. Always open the change to confirm before acting.
+  <b>"Action needed from us"</b> is inferred, not authoritative: <b>Merge conflict</b> means Gerrit's own mergeability check — the same one behind the "Merge Conflict" box on the change page — reports this patch can't be merged as-is against its target branch; <b>Changes requested</b> means a non-team reviewer currently has a &minus;1/&minus;2 Code-Review vote standing; <b>Reviewer reply expected</b> means Gerrit still marks an inline comment thread (or, failing that, the last written message) as coming from a reviewer and unanswered (hover the pill for it); <b>Awaiting reviewer attention</b> means no one has reviewed it yet; <b>On track</b> means there's reviewer engagement with nothing outstanding — including patches reviewed entirely through inline comments that were all resolved without a formal vote. Always open the change to confirm before acting.
   <br><br>
   In the <b>Review activity</b> column, an <span class="c-open">open thread</span> tag on a comment means Gerrit still has that specific inline discussion marked unresolved and the last word in it belongs to a reviewer — nobody on the team has replied and marked it resolved. That's the same signal driving the Action column; the tag just points to which comment below is the open one.
   A comment highlighted with <span class="msg-flag">↳ drives verdict</span> is the exact one the Action column's verdict for that row was computed from — when several comments are shown, this is the one being quoted above, not just the most recent.
