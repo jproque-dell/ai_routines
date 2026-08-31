@@ -64,18 +64,19 @@ def fetch_inline_comments(patch_id):
     return out
 
 
-def fetch_conflicts(patch_id):
-    """The "Merge conflicts" box on a Gerrit change page, reproduced exactly:
-    Gerrit's `conflicts:<id>` search operator, which lists every other *open*
-    change on the branch whose diff overlaps this one's closely enough that
-    merging one would break a clean merge of the other. This is a distinct,
-    pairwise check against other in-flight changes — NOT the same thing as
-    the /revisions/{rev}/mergeable endpoint, which only tests whether this
-    patch set applies cleanly onto the *current* tip of its target branch.
-    A patch can pass that test (mergeable: true) while still showing several
-    entries here, and that's normal on an actively-developed shared driver.
+def fetch_mergeable(patch_id, revision):
+    """Whether this patch set actually applies cleanly onto the current tip
+    of its target branch — Gerrit's own authoritative merge-conflict signal
+    (the `mergeable` field on /revisions/{rev}/mergeable).
+
+    This is deliberately NOT the `conflicts:` search operator (the list in
+    the change page's "Merge conflicts" box): that box is a predictive,
+    pairwise overlap check against other *open* changes and can list
+    plenty of entries — most never actually block a merge, since only one
+    of them will land first and the rest just rebase. `mergeable` is the
+    real, binary answer: can this patch set be merged right now, yes or no.
     """
-    url = f"{GERRIT_BASE}/changes/?q=status:open+conflicts:{patch_id}"
+    url = f"{GERRIT_BASE}/changes/{patch_id}/revisions/{revision}/mergeable"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -85,10 +86,10 @@ def fetch_conflicts(patch_id):
     if raw.startswith(XSSI_PREFIX):
         raw = raw[len(XSSI_PREFIX):]
     try:
-        changes = json.loads(raw)
+        info = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    return [{"id": c.get("_number"), "subject": c.get("subject", "")} for c in changes]
+    return info.get("mergeable")
 
 
 def fetch_change(patch_id):
@@ -140,9 +141,10 @@ def fetch_change(patch_id):
     verified = label_summary("Verified")
     code_review = label_summary("Code-Review")
 
-    conflicts = None
-    if status == "NEW":
-        conflicts = fetch_conflicts(patch_id)
+    mergeable = None
+    current_revision = data.get("current_revision")
+    if status == "NEW" and current_revision:
+        mergeable = fetch_mergeable(patch_id, current_revision)
 
     messages = data.get("messages", []) or []
     latest_comments = []
@@ -168,7 +170,7 @@ def fetch_change(patch_id):
         "submitted": submitted,
         "verified": verified,
         "code_review": code_review,
-        "conflicts": conflicts,
+        "mergeable": mergeable,
         "comments": latest_comments,
         "url": f"{GERRIT_BASE}/c/{project}/+/{patch_id}" if project else f"{GERRIT_BASE}/c/{patch_id}",
     }
@@ -196,8 +198,7 @@ def main():
             result["inline_comments"] = fetch_inline_comments(pid)
         cache[pid] = result
         n_inline = len(result.get("inline_comments", []))
-        n_conflicts = len(result.get("conflicts") or [])
-        conflict_note = f" [{n_conflicts} MERGE CONFLICT{'S' if n_conflicts != 1 else ''}]" if n_conflicts else ""
+        conflict_note = " [MERGE CONFLICT]" if result.get("mergeable") is False else ""
         print(f"OK ({n_inline} inline comments){conflict_note}" if result.get("found") else f"FAIL ({result.get('error')})")
         time.sleep(0.15)
 

@@ -182,13 +182,9 @@ def compute_action(lv):
     """Infer whether a reviewer is waiting on an action from our side.
 
     Priority: merged/abandoned patches need nothing further; a merge conflict
-    (Gerrit's `conflicts:` search — the same list shown in the "Merge
-    conflicts" box on the change page: other *open* changes on the branch
-    whose diff overlaps this one's closely enough that merging one first
-    would break a clean merge of the other) blocks everything else and
-    always needs a rebase from us first — note this is a pairwise check
-    against other in-flight changes, not the same thing as whether this
-    patch set currently applies onto the tip of its target branch; a live
+    (Gerrit's own `mergeable` flag on the current revision — this patch set
+    no longer applies cleanly onto the current tip of its target branch)
+    blocks everything else and always needs a rebase from us first; a live
     -1/-2 from a non-team Code-Review voter means changes were explicitly
     requested; Gerrit's own "unresolved" flag on an inline comment thread
     whose last word is a reviewer's is the most authoritative "reply
@@ -205,14 +201,9 @@ def compute_action(lv):
         return {"level": "none", "label": "No action needed",
                 "detail": "Merged" if status == "MERGED" else "Abandoned"}
 
-    conflicts = lv.get("conflicts") or []
-    if conflicts:
-        n = len(conflicts)
-        names = ", ".join(f"#{c['id']} ({c['subject']})" for c in conflicts[:5])
-        if n > 5:
-            names += f", and {n - 5} more"
+    if lv.get("mergeable") is False:
         return {"level": "bad", "label": "Merge conflict",
-                "detail": f"Conflicts with {n} open change{'s' if n != 1 else ''} on this branch — rebase needed before this can merge cleanly: {names}."}
+                "detail": "This patch set no longer applies cleanly onto the current tip of its target branch — needs a rebase before it can merge."}
 
     cr_votes = ((lv.get("code_review") or {}).get("votes")) or []
     negative = [(n, v) for n, v in cr_votes if v < 0 and not is_team_member(n)]
@@ -268,12 +259,12 @@ def main():
     abandoned = sum(1 for r in rows if r["_live"].get("status") == "ABANDONED")
     unresolved = sum(1 for r in rows if not r["_live"].get("found"))
     action_needed = sum(1 for r in rows if r["_action"]["level"] in ("bad", "warn"))
-    merge_conflicts = sum(1 for r in rows if r["_live"].get("conflicts"))
+    merge_conflicts = sum(1 for r in rows if r["_live"].get("mergeable") is False)
 
     ready_to_merge = 0
     for r in rows:
         lv = r["_live"]
-        if lv.get("status") != "NEW" or lv.get("conflicts"):
+        if lv.get("status") != "NEW" or lv.get("mergeable") is False:
             continue
         cr = (lv.get("code_review") or {}).get("state", "")
         ver = (lv.get("verified") or {}).get("state", "")
@@ -300,15 +291,9 @@ def main():
         cls = {"MERGED": "pill-good", "NEW": "pill-warn", "ABANDONED": "pill-bad"}.get(st, "pill-unknown")
         label = {"MERGED": "Merged", "NEW": "Open", "ABANDONED": "Abandoned"}.get(st, st.title())
         pill = f'<span class="pill {cls}">{label}</span>'
-        conflicts = lv.get("conflicts") or []
-        if conflicts:
-            n = len(conflicts)
-            names = ", ".join(f"#{c['id']} ({c['subject']})" for c in conflicts[:5])
-            if n > 5:
-                names += f", and {n - 5} more"
-            title = esc(f"Conflicts with {n} open change{'s' if n != 1 else ''} on this branch — the "
-                        f"'Merge conflicts' box on the change page: {names}")
-            pill += f' <span class="pill pill-bad" title="{title}">⚠ Conflict</span>'
+        if lv.get("mergeable") is False:
+            title = esc("This patch set no longer applies cleanly onto the current tip of its target branch — needs a rebase.")
+            pill += f' <span class="pill pill-bad" title="{title}">⚠ Merge conflict</span>'
         return pill
 
     def vote_badge(label_data, name):
@@ -758,7 +743,7 @@ def main():
   opendev.org's Gerrit REST API doesn't send CORS headers, and this page's sandbox blocks requests to any host but Google Fonts — so this table can't poll live from your browser. It's a snapshot fetched server-side and baked into the page.
   To refresh it: re-run <code>fetch_gerrit.py --section "2026.2 Hibiscus"</code> then <code>build.py</code> in the dashboard working directory, and republish.
   <br><br>
-  <b>"Action needed from us"</b> is inferred, not authoritative: <b>Merge conflict</b> means Gerrit's "Merge conflicts" box on the change page lists at least one other <i>open</i> change on the same branch whose diff overlaps this one's — whichever merges second will need a rebase (hover the pill for the list); this is a pairwise check against other in-flight changes, independent of whether this patch set currently applies onto the tip of its target branch; <b>Changes requested</b> means a non-team reviewer currently has a &minus;1/&minus;2 Code-Review vote standing; <b>Reviewer reply expected</b> means Gerrit still marks an inline comment thread (or, failing that, the last written message) as coming from a reviewer and unanswered (hover the pill for it); <b>Awaiting reviewer attention</b> means no one has reviewed it yet; <b>On track</b> means there's reviewer engagement with nothing outstanding — including patches reviewed entirely through inline comments that were all resolved without a formal vote. Always open the change to confirm before acting.
+  <b>"Action needed from us"</b> is inferred, not authoritative: <b>Merge conflict</b> means Gerrit's own <code>mergeable</code> check on the current revision came back false — this patch set no longer applies cleanly onto the current tip of its target branch and needs a rebase before it can merge (hover the pill). This is deliberately not the same thing as the "Merge conflicts" box shown on the change page itself, which lists other <i>open</i> changes whose diffs merely overlap — a predictive, pairwise signal that doesn't mean an actual conflict exists yet; <b>Changes requested</b> means a non-team reviewer currently has a &minus;1/&minus;2 Code-Review vote standing; <b>Reviewer reply expected</b> means Gerrit still marks an inline comment thread (or, failing that, the last written message) as coming from a reviewer and unanswered (hover the pill for it); <b>Awaiting reviewer attention</b> means no one has reviewed it yet; <b>On track</b> means there's reviewer engagement with nothing outstanding — including patches reviewed entirely through inline comments that were all resolved without a formal vote. Always open the change to confirm before acting.
   <br><br>
   In the <b>Review activity</b> column, an <span class="c-open">open thread</span> tag on a comment means Gerrit still has that specific inline discussion marked unresolved and the last word in it belongs to a reviewer — nobody on the team has replied and marked it resolved. That's the same signal driving the Action column; the tag just points to which comment below is the open one.
   A comment highlighted with <span class="msg-flag">↳ drives verdict</span> is the exact one the Action column's verdict for that row was computed from — when several comments are shown, this is the one being quoted above, not just the most recent.
